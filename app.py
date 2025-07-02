@@ -11,9 +11,6 @@ from langchain_upstage import ChatUpstage
 from langchain_pinecone import PineconeVectorStore
 from pinecone import Pinecone, ServerlessSpec
 from pydantic import BaseModel
-from ragas import evaluate
-from ragas.metrics import faithfulness, answer_relevancy, context_precision, context_recall
-from datasets import Dataset
 
 load_dotenv()
 
@@ -67,8 +64,8 @@ class EvaluateRequest(BaseModel):
     question: str
     answer: str
 
-@app.post("/evaluate-ragas")
-async def evaluate_ragas(req: EvaluateRequest):
+@app.post("/evaluate")
+async def evaluate(req: EvaluateRequest):
     question = req.question.strip()
     user_answer = req.answer.strip()
 
@@ -83,37 +80,12 @@ async def evaluate_ragas(req: EvaluateRequest):
     
     if ground_truth not in contexts:
         contexts.append(ground_truth) 
-        
-    dataset = Dataset.from_list([{
-        "question": question,
-        "answer": user_answer,
-        "contexts": contexts,
-        "ground_truth": ground_truth
-    }])
-
-    results = evaluate(
-        dataset=dataset,
-        metrics=[faithfulness, answer_relevancy, context_precision, context_recall]
-    )
-    
-    df = results.to_pandas().iloc[0]
-     
-    scores = {
-        "faithfulness": df["faithfulness"],
-        "answer_relevancy": df["answer_relevancy"],
-        "context_precision": df["context_precision"],
-        "context_recall": df["context_recall"]
-    }
-    
-    for key, value in scores.items():
-        print(f"{key}: {value:.4f}")
-    
+  
     prompt = build_feedback_prompt(
         question=question,
         user_answer=user_answer,
         context_list=contexts,
-        ground_truth=ground_truth,
-        ragas_scores=scores
+        ground_truth=ground_truth
     )
 
     response = openai_client.chat.completions.create(
@@ -138,7 +110,7 @@ def build_system_prompt():
         "친절하고 논리적으로 피드백을 주고, 너무 공격적이지 않게 개선점을 알려주세요."
     )
 
-def build_feedback_prompt(question, user_answer, context_list, ground_truth, ragas_scores):
+def build_feedback_prompt(question, user_answer, context_list, ground_truth):
     context_text = "\n".join(context_list)
 
     prompt = f"""
@@ -159,10 +131,6 @@ def build_feedback_prompt(question, user_answer, context_list, ground_truth, rag
 - 사용자가 말하지 않은 내용을 **추론하거나 과하게 긍정적으로 말하지 마세요.**  
   → 반드시 실제 답변 내용에 **한정해서** 평가해 주세요.
 
-- 내부적으로 제공되는 **RAGAS 점수(Faithfulness, Answer Relevancy 등)**는 참고용입니다.  
-  → "점수가 낮습니다" 같은 표현은 사용하지 말고, 점수가 낮은 항목이 있다면  
-  → "질문과 관련성이 조금 약해 보입니다"처럼 자연스러운 말투로 피드백하세요.
-
 - 피드백은 지적과 격려의 균형을 맞춰서, 성장할 수 있도록 **구체적이고 따뜻하게** 작성해주세요.
 
 ---
@@ -180,12 +148,6 @@ def build_feedback_prompt(question, user_answer, context_list, ground_truth, rag
 
 ✅ 모범답변:  
 {ground_truth}
-
-📊 내부 평가 지표 (참고용):
-- Faithfulness: {ragas_scores['faithfulness']}
-- Answer Relevancy: {ragas_scores['answer_relevancy']}
-- Context Precision: {ragas_scores['context_precision']}
-- Context Recall: {ragas_scores['context_recall']}
 """
     return prompt
 
