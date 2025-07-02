@@ -2,6 +2,7 @@ import os
 import json
 import random
 
+from openai import OpenAI
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
 from langchain.chains import RetrievalQA
@@ -20,6 +21,9 @@ chat_upstage = ChatUpstage()
 embedding_upstage = UpstageEmbeddings(model="embedding-query")
 
 pinecone_api_key = os.environ.get("PINECONE_API_KEY")
+openai_api_key = os.environ.get("OPENAI_API_KEY")
+openai_client = OpenAI(api_key=openai_api_key)
+
 pc = Pinecone(api_key=pinecone_api_key)
 index_name = "cs-interview-index"
 
@@ -76,7 +80,10 @@ async def evaluate_ragas(req: EvaluateRequest):
 
     retrieved_docs = pinecone_retriever.get_relevant_documents(question)
     contexts = [doc.page_content for doc in retrieved_docs]
-
+    
+    if ground_truth not in contexts:
+        contexts.append(ground_truth) 
+        
     dataset = Dataset.from_list([{
         "question": question,
         "answer": user_answer,
@@ -84,33 +91,104 @@ async def evaluate_ragas(req: EvaluateRequest):
         "ground_truth": ground_truth
     }])
 
-    # results = evaluate(
-    #     dataset=dataset,
-    #     metrics=[faithfulness, answer_relevancy, context_precision, context_recall]
-    # )
-    
-    # answer_relevancy만 평가
     results = evaluate(
         dataset=dataset,
-        metrics=[answer_relevancy]
+        metrics=[faithfulness, answer_relevancy, context_precision, context_recall]
+    )
+    
+    df = results.to_pandas().iloc[0]
+     
+    scores = {
+        "faithfulness": df["faithfulness"],
+        "answer_relevancy": df["answer_relevancy"],
+        "context_precision": df["context_precision"],
+        "context_recall": df["context_recall"]
+    }
+    
+    for key, value in scores.items():
+        print(f"{key}: {value:.4f}")
+    
+    prompt = build_feedback_prompt(
+        question=question,
+        user_answer=user_answer,
+        context_list=contexts,
+        ground_truth=ground_truth,
+        ragas_scores=scores
     )
 
-    # scores = results.to_pandas().iloc[0].to_dict()
-    # return {
-    #     "question": question,
-    #     "user_answer": user_answer,
-    #     "ground_truth": ground_truth,
-    #     "ragas_scores": scores
-    # }
-    # answer_relevancy 점수만 추출
-    score = results.to_pandas().iloc[0]["answer_relevancy"]
+    response = openai_client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": build_system_prompt()},
+            {"role": "user", "content": prompt}
+        ],
+        temperature=0.7
+    )
 
-    return {
-        "question": question,
-        "user_answer": user_answer,
-        "ground_truth": ground_truth,
-        "answer_relevancy": score
-    }
+    content = response.choices[0].message.content
+    if content is None:
+        raise ValueError("LLM 응답이 비어 있습니다.")
+    feedback = content.strip()
+    
+    return {"reply": feedback}
+
+def build_system_prompt():
+    return (
+        "당신은 시니어 개발자이며, 후배 개발자의 기술 면접을 도와주는 면접 코치입니다. "
+        "친절하고 논리적으로 피드백을 주고, 너무 공격적이지 않게 개선점을 알려주세요."
+    )
+
+def build_feedback_prompt(question, user_answer, context_list, ground_truth, ragas_scores):
+    context_text = "\n".join(context_list)
+
+    prompt = f"""
+당신은 개발자 면접 코치입니다. 아래의 질문과 사용자의 답변을 평가하여, 실전 면접처럼 자연스럽고 논리적인 피드백을 한국어로 작성해주세요.  
+다음 3가지 항목을 중심으로 구성해 주세요:
+
+1. 사용자가 어떤 핵심 키워드를 잘 언급했는지  
+2. 어떤 핵심 개념이 누락되었는지 (문맥 또는 모범답안 기준)  
+3. 면접 스타일(설명 순서, 표현 방식 등)에서 어떻게 보완하면 좋을지  
+
+---
+
+  **중요 지침** (절대 위반하지 마세요):
+
+- 사용자의 답변이 너무 짧거나 단어만 나열되어 있으면, **이해도를 판단하기 어렵다고 명확하게 지적**해야 합니다.  
+  → "핵심 용어는 언급되었지만 설명이 없어 면접에서 낮은 평가를 받을 수 있습니다." 라고 평가해 주세요.
+
+- 사용자가 말하지 않은 내용을 **추론하거나 과하게 긍정적으로 말하지 마세요.**  
+  → 반드시 실제 답변 내용에 **한정해서** 평가해 주세요.
+
+- 내부적으로 제공되는 **RAGAS 점수(Faithfulness, Answer Relevancy 등)**는 참고용입니다.  
+  → "점수가 낮습니다" 같은 표현은 사용하지 말고, 점수가 낮은 항목이 있다면  
+  → "질문과 관련성이 조금 약해 보입니다"처럼 자연스러운 말투로 피드백하세요.
+
+- 피드백은 지적과 격려의 균형을 맞춰서, 성장할 수 있도록 **구체적이고 따뜻하게** 작성해주세요.
+
+---
+
+📌 질문:  
+{question}
+
+✍️ 사용자 답변:  
+{user_answer}
+
+반드시 사용자 답변으로만 판단해서 답변하세요. 반드시!!!!!
+
+📚 검색된 문맥 정보:  
+{context_text}
+
+✅ 모범답변:  
+{ground_truth}
+
+📊 내부 평가 지표 (참고용):
+- Faithfulness: {ragas_scores['faithfulness']}
+- Answer Relevancy: {ragas_scores['answer_relevancy']}
+- Context Precision: {ragas_scores['context_precision']}
+- Context Recall: {ragas_scores['context_recall']}
+"""
+    return prompt
+
 
 
 @app.get("/health")
