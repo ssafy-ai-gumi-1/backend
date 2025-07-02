@@ -4,6 +4,7 @@ import json
 from dotenv import load_dotenv
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
+from langchain.document_loaders import UnstructuredMarkdownLoader
 from langchain_upstage import UpstageEmbeddings
 from langchain_pinecone import PineconeVectorStore
 from pinecone import Pinecone, ServerlessSpec
@@ -33,20 +34,29 @@ print("start")
 json_path = "qa_data.json"
 with open(json_path, "r", encoding="utf-8") as f:
     json_data = json.load(f)
-
+    
 documents = []
 for data in json_data:
     content = f"Q: {data['question']}\nA: {data['answer']}"
     metadata = {
-        "question": data["question"],
-        "answer": data["answer"],
         "category": data["category"],
         "keywords": data["keywords"],
     }
     documents.append(Document(page_content=content, metadata=metadata))
 
+    
+# ===============================
+# md 파일 로딩 및 파일 구성
+md_file_path = "data/your_docs.md"
+loader = UnstructuredMarkdownLoader(md_file_path)
+documents = loader.load()
+
 # 5. Chunking
-text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
+text_splitter = RecursiveCharacterTextSplitter(
+    chunk_size=500,
+    chunk_overlap=60
+)
+
 splits = text_splitter.split_documents(documents)
 
 # 6. 벡터 임베딩 + Pinecone 업로드
