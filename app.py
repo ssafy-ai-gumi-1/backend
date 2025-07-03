@@ -41,6 +41,17 @@ pinecone_retriever = pinecone_vectorstore.as_retriever(
 
 app = FastAPI()
 
+from fastapi.middleware.cors import CORSMiddleware
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
 with open("qa_data.json", "r", encoding="utf-8") as f:
     qa_data = json.load(f)
 
